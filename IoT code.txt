@@ -1,0 +1,372 @@
+/*********************************************************
+   IoT SMART CARGO WEIGHT MONITORING SYSTEM
+   ESP32 + Blynk + HX711 + DHT11 + LCD I2C
+   + SIM900A + L298N Motor Driver
+ *********************************************************/
+
+//================ BLYNK =================
+#define BLYNK_TEMPLATE_ID "TMPL2CkyQzTmI"
+#define BLYNK_TEMPLATE_NAME "IoT SMART CARGO WEIGHT MONITORING SYSTEM"
+#define BLYNK_AUTH_TOKEN "9LxYty0c0HN2k8-z3Q8mOOKNfko-R6CW"
+
+
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+#include <HX711_ADC.h>
+#include <DHT.h>
+
+#include <HardwareSerial.h>
+
+//================ WIFI =================
+char auth[] = BLYNK_AUTH_TOKEN;
+char ssid[] = "Fatima";
+char pass[] = "Tima2003";
+
+//================ MOTOR PINS =================
+#define IN1 25
+#define IN2 26
+#define IN3 27
+#define IN4 14
+
+#define ENA 32
+#define ENB 33
+
+//================ HX711 =================
+#define HX_DT 4
+#define HX_SCK 5
+
+HX711_ADC LoadCell(HX_DT, HX_SCK);
+
+//================ DHT11 =================
+#define DHTPIN 23
+#define DHTTYPE DHT11
+
+DHT dht(DHTPIN, DHTTYPE);
+
+//================ LCD =================
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+//================ ALERT DEVICES =================
+#define BUZZER    13
+#define RED_LED   12
+#define GREEN_LED 15
+
+//================ GSM =================
+HardwareSerial gsm(2);
+
+// RX2 = GPIO16
+// TX2 = GPIO17
+
+//================ VARIABLES =================
+float weight = 0;
+float temperature = 0;
+
+bool smsSent = false;
+
+int motorSpeed = 200;
+
+//================ TIMER =================
+BlynkTimer timer;
+
+//================================================
+// SETUP
+//================================================
+void setup()
+{
+  Serial.begin(115200);
+
+  // GSM
+  gsm.begin(9600, SERIAL_8N1, 16, 17);
+gsm.println("AT+CSQ");
+delay(1000);
+
+while(gsm.available())
+{
+  Serial.write(gsm.read());
+}
+  // LCD
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(0,0);
+  lcd.print("SMART CARGO");
+  lcd.setCursor(0,1);
+  lcd.print("Initializing");
+  delay(2000);
+
+  // LEDs
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+
+  digitalWrite(GREEN_LED, HIGH);
+
+  // Motor
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  stopAll();
+
+  // DHT
+  dht.begin();
+
+  // HX711
+  LoadCell.begin();
+  LoadCell.start(2000);
+
+  LoadCell.setCalFactor(84500.0);
+
+  // Blynk
+  Blynk.begin(auth, ssid, pass);
+
+  timer.setInterval(1000L, readSensors);
+}
+
+//================================================
+// LOOP
+//================================================
+void loop()
+{
+  Blynk.run();
+  timer.run();
+}
+
+//================================================
+// SENSOR READING
+//================================================
+void readSensors()
+{
+  LoadCell.update();
+
+  // Weight Reading
+  weight = LoadCell.getData();
+
+  if(weight < 0)
+  {
+    weight = 0;
+  }
+
+  // Temperature Reading
+  temperature = dht.readTemperature();
+
+  if(isnan(temperature))
+  {
+    temperature = 0;
+  }
+
+  // Blynk Display
+  Blynk.virtualWrite(V5, weight);
+  Blynk.virtualWrite(V6, temperature);
+
+  // LCD Display
+  lcd.clear();
+
+  lcd.setCursor(0,0);
+  lcd.print("SMART CARGO SYS");
+
+  lcd.setCursor(0,1);
+  lcd.print("W:");
+  lcd.print(weight,1);
+  lcd.print("KG ");
+
+  lcd.print("T:");
+  lcd.print(temperature,1);
+  lcd.print("C");
+
+  // Serial Monitor
+  Serial.print("Weight = ");
+  Serial.print(weight,2);
+  Serial.println(" KG");
+
+  checkWeight();
+}
+
+//================================================
+// OVERLOAD CHECK
+//================================================
+void checkWeight()
+{
+  if(weight >= 2.0)
+  {
+    digitalWrite(RED_LED, HIGH);
+
+    tone(BUZZER, 2000);
+
+    lcd.clear();
+
+    lcd.setCursor(0,0);
+    lcd.print("SMART CARGO SYS");
+
+    lcd.setCursor(0,1);
+    lcd.print("OVERLOAD >2KG");
+
+    if(!smsSent)
+    {
+      sendSMS();
+      smsSent = true;
+    }
+  }
+  else
+  {
+    digitalWrite(RED_LED, LOW);
+
+    noTone(BUZZER);
+
+    smsSent = false;
+  }
+}
+
+//================================================
+// SEND SMS
+//================================================
+void sendSMS()
+{
+  Serial.println("Sending SMS...");
+
+  gsm.println("AT+CMGF=1");
+  delay(2000);
+
+  while(gsm.available())
+  {
+    Serial.write(gsm.read());
+  }
+
+  gsm.println("AT+CMGS=\"+252619895952\"");
+  delay(3000);
+
+  while(gsm.available())
+  {
+    Serial.write(gsm.read());
+  }
+
+  gsm.print("ALERT! Cargo Weight Exceeded 2KG");
+  delay(1000);
+
+  gsm.write(26);   // CTRL+Z
+
+  Serial.println("Waiting for network...");
+
+  delay(15000);
+
+  while(gsm.available())
+  {
+    Serial.write(gsm.read());
+  }
+
+  Serial.println("SMS Process Finished");
+}
+
+//================================================
+// BLYNK MOTOR CONTROL
+//================================================
+
+// LEFT
+BLYNK_WRITE(V0)
+{
+  if(param.asInt())
+    turnLeft();
+  else
+    stopAll();
+}
+
+// FORWARD
+BLYNK_WRITE(V1)
+{
+  if(param.asInt())
+    forward();
+  else
+    stopAll();
+}
+
+// BACKWARD
+BLYNK_WRITE(V2)
+{
+  if(param.asInt())
+    backward();
+  else
+    stopAll();
+}
+
+// RIGHT
+BLYNK_WRITE(V3)
+{
+  if(param.asInt())
+    turnRight();
+  else
+    stopAll();
+}
+
+//================================================
+// MOTOR FUNCTIONS
+//================================================
+void forward()
+{
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void backward()
+{
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void turnLeft()
+{
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void turnRight()
+{
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void stopAll()
+{
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
